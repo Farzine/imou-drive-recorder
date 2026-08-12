@@ -4,6 +4,7 @@ set (or a .env you have sourced).
 
     python tools/imou_cli.py devices
     python tools/imou_cli.py hls <deviceId> [streamId]
+    python tools/imou_cli.py new-secret
     python tools/imou_cli.py set-callback https://your-app.onrender.com/hook/<secret>
     python tools/imou_cli.py get-callback
     python tools/imou_cli.py disable-callback
@@ -22,6 +23,55 @@ client = ImouClient(
     app_secret=os.getenv("IMOU_APP_SECRET", ""),
     base_url=os.getenv("IMOU_BASE_URL", "https://openapi.easy4ip.com/openapi"),
 )
+
+
+SAFE_SECRET_CHARS = set(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+
+
+def validate_callback_url(url):
+    """Catch the two failure modes that produce OP1003: a shell-mangled URL,
+    and a secret containing characters that are not legal in a URL path."""
+    ok = True
+    if not url.startswith("https://"):
+        print(f"! Must be https, got: {url}")
+        ok = False
+    if " " in url:
+        print("! URL contains a space -- your shell split the argument.")
+        ok = False
+
+    path = url.split("/hook/", 1)[-1] if "/hook/" in url else ""
+    bad = sorted(set(path) - SAFE_SECRET_CHARS)
+    if bad:
+        print(f"! Secret contains characters unsafe in a URL/shell: {bad}")
+        print("  Generate a clean one:  python tools/imou_cli.py new-secret")
+        print("  then update WEBHOOK_SECRET on Render and redeploy.")
+        ok = False
+    elif not path:
+        print("! No /hook/<secret> segment found in the URL.")
+        ok = False
+    return ok
+
+
+def preflight(url):
+    """Imou validates the address, and a callback it cannot reach is useless
+    anyway. Confirm our own endpoint answers 200 first."""
+    import requests
+    print(f"Checking {url} ...")
+    try:
+        r = requests.get(url, timeout=30)
+    except requests.RequestException as exc:
+        print(f"! Unreachable: {exc}")
+        return False
+    if r.status_code == 404:
+        print("! 404 -- the secret in this URL does not match WEBHOOK_SECRET "
+              "on Render. Fix the env var (and redeploy) or the URL.")
+        return False
+    if r.status_code != 200:
+        print(f"! HTTP {r.status_code}; Imou requires a 200.")
+        return False
+    print("  200 OK")
+    return True
 
 
 def list_devices(verbose=False):
@@ -89,10 +139,20 @@ def main(argv):
 
     elif cmd == "set-callback":
         if not args:
-            print("usage: set-callback <https url>")
+            print("usage: set-callback <https url> [--skip-check]")
             return 1
-        print(json.dumps(client.set_message_callback(args[0]), indent=2))
+        url = args[0]
+        if not validate_callback_url(url):
+            return 1
+        if "--skip-check" not in args and not preflight(url):
+            return 1
+        print(f"Registering: {url}")
+        print(json.dumps(client.set_message_callback(url), indent=2))
         print("Callback registered. Note: one URL per developer account.")
+
+    elif cmd == "new-secret":
+        import secrets
+        print(secrets.token_urlsafe(32))
 
     elif cmd == "get-callback":
         print(json.dumps(client.get_message_callback(), indent=2))

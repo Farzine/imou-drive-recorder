@@ -210,7 +210,8 @@ class ImouClient:
 
     # ------------------------------------------------------------------- push
 
-    def set_message_callback(self, callback_url, callback_flag="alarm", status="on"):
+    def set_message_callback(self, callback_url,
+                             callback_flag="alarm,deviceStatus", status="on"):
         """Register (or disable) the alarm webhook. One URL per developer
         account -- setting a new one replaces the old one."""
         return self.call(

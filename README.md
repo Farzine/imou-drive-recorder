@@ -169,10 +169,19 @@ curl https://<your-app>.onrender.com/status
 ## Step 5 — Register the webhook
 
 ```bash
+# Generate a URL-safe secret (letters, digits, - and _ only)
+python tools/imou_cli.py new-secret
+
+# Set it as WEBHOOK_SECRET on Render, wait for the redeploy, then:
 python tools/imou_cli.py set-callback \
-  https://<your-app>.onrender.com/hook/<WEBHOOK_SECRET>
+  'https://<your-app>.onrender.com/hook/<WEBHOOK_SECRET>'
 python tools/imou_cli.py get-callback            # read it back
 ```
+
+**Single-quote the URL.** And do not hand-roll the secret with `$ % & @` in it —
+`$` and `&` are shell metacharacters, and `%` starts a percent-escape in a URL
+path. `new-secret` avoids all of them. The command pre-flights the URL and
+refuses to register one that doesn't return 200.
 
 One callback URL per developer account — registering a new one replaces the old.
 The secret in the path is what stops strangers from triggering recordings and
@@ -258,6 +267,7 @@ Tunnel rather than port-forwarding. Everything else is identical.
 | `invalid_grant` after ~a week | Consent screen still in Testing. Step 1.6, then regenerate the token |
 | `OP1011` | Daily interface-call cap hit. Raise `COOLDOWN_SECONDS` |
 | `OP1002` parameter missing | Wrong params for that endpoint. Note it means auth *worked* |
+| `OP1003` on set-callback | Bad `callbackUrl`: shell-mangled, non-https, or unsafe characters in the secret |
 | `devices` prints nothing | Credentials fine, camera not bound to the developer account |
 | Callback stopped firing | Your endpoint returned non-200 too often. Check `/status`, re-register |
 | `device not found` | Wrong `IMOU_BASE_URL` data centre, or camera bound to a different Imou account |
