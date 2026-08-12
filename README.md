@@ -257,6 +257,8 @@ Tunnel rather than port-forwarding. Everything else is identical.
 |---|---|
 | `invalid_grant` after ~a week | Consent screen still in Testing. Step 1.6, then regenerate the token |
 | `OP1011` | Daily interface-call cap hit. Raise `COOLDOWN_SECONDS` |
+| `OP1002` parameter missing | Wrong params for that endpoint. Note it means auth *worked* |
+| `devices` prints nothing | Credentials fine, camera not bound to the developer account |
 | Callback stopped firing | Your endpoint returned non-200 too often. Check `/status`, re-register |
 | `device not found` | Wrong `IMOU_BASE_URL` data centre, or camera bound to a different Imou account |
 | ffmpeg: 0-byte file | Camera hadn't started publishing. Raise the `attempts` in `wait_for_playlist` |

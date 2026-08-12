@@ -107,8 +107,48 @@ class ImouClient:
 
     # ----------------------------------------------------------------- device
 
-    def device_list(self, query_range="1-10"):
-        return self.call("deviceBaseList", {"queryRange": query_range})
+    def device_base_list(self, bind_id=-1, limit=20, list_type="bindAndShare",
+                         need_ap_info=False):
+        """Paged list of devices bound to / shared with this developer account.
+
+        bind_id: -1 for the first page, then pass the last item's bindId.
+        list_type: "bind", "share" or "bindAndShare".
+        """
+        return self.call(
+            "deviceBaseList",
+            {
+                "bindId": int(bind_id),
+                "limit": int(limit),
+                "type": list_type,
+                "needApInfo": bool(need_ap_info),
+            },
+        )
+
+    def list_device_details_by_page(self, page=1, page_size=20,
+                                    source="bindAndShare"):
+        """Newer paged endpoint. Richer output (deviceName, deviceStatus) but
+        not enabled on every account -- callers should fall back."""
+        return self.call(
+            "listDeviceDetailsByPage",
+            {"page": int(page), "pageSize": int(page_size), "source": source},
+        )
+
+    def iter_devices(self, limit=20, list_type="bindAndShare"):
+        """Yield every device across all pages of deviceBaseList."""
+        bind_id = -1
+        seen = 0
+        while True:
+            data = self.device_base_list(bind_id, limit, list_type)
+            devices = data.get("deviceList") or []
+            if not devices:
+                return
+            for d in devices:
+                yield d
+            seen += len(devices)
+            total = int(data.get("count", seen))
+            if seen >= total or len(devices) < limit:
+                return
+            bind_id = devices[-1].get("bindId", -1)
 
     # ------------------------------------------------------------ live stream
 
