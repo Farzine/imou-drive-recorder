@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: imou-drive-recorder
+    runtime: docker
+    plan: free
+    region: singapore
+    healthCheckPath: /healthz
+    envVars:
+      - key: IMOU_APP_ID
+        sync: false
+      - key: IMOU_APP_SECRET
+        sync: false
+      - key: IMOU_BASE_URL
+        value: https://openapi.easy4ip.com/openapi
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: GOOGLE_TOKEN_JSON
+        sync: false
+      - key: STREAM_SOURCE
+        value: hls
+      - key: STREAM_ID
+        value: "1"
+      - key: CLIP_SECONDS
+        value: "15"
+      - key: COOLDOWN_SECONDS
+        value: "60"
+      - key: RETENTION_DAYS
+        value: "14"
+      - key: UPLOAD_SNAPSHOT
+        value: "true"
