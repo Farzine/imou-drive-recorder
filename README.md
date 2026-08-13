@@ -70,7 +70,15 @@ Your LAN is not in that diagram anywhere. That's the point.
 | Google Drive | 15 GB | ~0.5–3 MB per 15 s clip; auto-deletes after 14 days |
 | Render web service | 750 instance-hours/mo | 730 h if kept awake 24/7 — just fits |
 | Imou API calls | 30,000/mo | ~3 calls per motion event |
-| Imou message push | monthly free quota | 1 per event |
+| Imou message push | 30,000/mo | 1 per event |
+| **Imou Flow (streaming)** | **2 GB, then $0.25/GB** | **every second of HLS you pull** |
+
+**Flow is the binding constraint, not API calls.** Pulling the cloud stream
+consumes metered bandwidth. On the SD sub-stream a 15 s clip is roughly 1 MB, so
+2 GB is on the order of a couple of thousand clips; on the main HD stream it is
+closer to a couple of hundred. `STREAM_ID=1`, a sane `MAX_CLIP_SECONDS`, and a
+tight `ALLOWED_MSG_TYPES` are what keep this free. Watch it under
+**Console → My Resources → Flow → Data Statistics** for the first few days.
 
 Check **Console → My Resources** for your account's real numbers; Imou meters
 live-stream minutes separately from API calls, and the free grant has changed
@@ -218,6 +226,13 @@ by starting three segments into the past, and the alarm JPEG that Imou attaches
 to the webhook *is* from the moment of motion — which is why this app uploads it
 too. If you need the clip to contain the actual event, you need LAN mode.
 
+**Clip length follows the motion.** Recording starts on the first alarm and
+keeps running while more arrive, stopping `MOTION_IDLE_SECONDS` after the last
+one, bounded by `MIN_`/`MAX_CLIP_SECONDS`. Repeat alarms during a recording
+extend it rather than queueing a second one — `/status` counts these as
+`events_extended`. ffmpeg is stopped by writing `q` to its stdin, not killed, so
+the MP4 index is written and the file plays.
+
 **Storage math.** SD 15 s ≈ 0.5–3 MB. Fifty events a day on a 14-day retention
 is around 1–2 GB. Set `RETENTION_DAYS=0` to disable pruning and you will
 eventually fill 15 GB and uploads will start failing.
@@ -252,11 +267,13 @@ Tunnel rather than port-forwarding. Everything else is identical.
 |---|---|---|
 | `STREAM_SOURCE` | `hls` | `hls` (cloud) or `rtsp` (LAN) |
 | `STREAM_ID` | `1` | 0 = main/HD, 1 = sub/SD. Swap if resolution looks wrong on your model |
-| `CLIP_SECONDS` | `15` | |
-| `COOLDOWN_SECONDS` | `60` | Per-device. Motion fires in bursts; without this you'll OOM a 512 MB container |
+| `MIN_CLIP_SECONDS` | `10` | Floor, even for a one-frame trigger |
+| `MAX_CLIP_SECONDS` | `120` | Ceiling. Also your Flow safety valve |
+| `MOTION_IDLE_SECONDS` | `12` | Stop once this long passes with no new alarm |
+| `COOLDOWN_SECONDS` | `5` | Brief gap after a clip ends before a new one may start |
 | `RETENTION_DAYS` | `14` | 0 = keep forever |
 | `UPLOAD_SNAPSHOT` | `true` | Uploads the alarm JPEG, which is from the actual moment of motion |
-| `ALLOWED_MSG_TYPES` | `videoMotion,human,…` | `*` for everything |
+| `ALLOWED_MSG_TYPES` | `*` | Accept all and log them; narrow once you know your camera's real strings |
 | `DRIVE_FOLDER_NAME` | `Imou Motion Clips` | Created on first upload |
 | `DRIVE_FOLDER_ID` | — | Overrides the name |
 
@@ -274,6 +291,8 @@ Tunnel rather than port-forwarding. Everything else is identical.
 | ffmpeg: 0-byte file | Camera hadn't started publishing. Raise the `attempts` in `wait_for_playlist` |
 | First clip after quiet hours is blank | Cold start. Step 6 |
 | `storageQuotaExceeded` | Drive full. Lower `RETENTION_DAYS` |
+| Events received but 0 uploaded | Check `/status`: `events_skipped` = filter/cooldown, `failures` = see `last_error` |
+| Flow quota draining fast | `STREAM_ID=1`, lower `MAX_CLIP_SECONDS`, narrow `ALLOWED_MSG_TYPES` |
 
 ## Endpoints
 
@@ -281,6 +300,18 @@ Tunnel rather than port-forwarding. Everything else is identical.
 |---|---|
 | `GET /healthz` | Uptime ping |
 | `GET /status` | Counters, config, Drive usage, last error |
+
+## Discovering endpoint parameters
+
+Imou's docs block automated fetching, so if you need an endpoint this app
+doesn't wrap, call it directly and iterate:
+
+```bash
+python tools/imou_cli.py raw queryLocalRecords deviceId=ABC channelId=0
+```
+
+`OP1002` means a parameter is missing, `OP1003` that one is invalid — both
+confirm auth is working and only the parameter set is wrong.
 | `POST /hook/<secret>` | Imou alarm callback |
 
 ## Reference

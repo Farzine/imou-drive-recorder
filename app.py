@@ -37,8 +37,13 @@ def _env_bool(name, default=False):
 # ----------------------------------------------------------------- settings
 
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
-CLIP_SECONDS = int(os.getenv("CLIP_SECONDS", "15"))
-COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "60"))
+# Variable-length clips, like the Imou app: recording starts on the first
+# alarm and keeps going while further alarms arrive, stopping once the camera
+# has been quiet for MOTION_IDLE_SECONDS.
+MIN_CLIP_SECONDS = int(os.getenv("MIN_CLIP_SECONDS", "10"))
+MAX_CLIP_SECONDS = int(os.getenv("MAX_CLIP_SECONDS", "120"))
+MOTION_IDLE_SECONDS = int(os.getenv("MOTION_IDLE_SECONDS", "12"))
+COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "5"))
 RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "14"))
 STREAM_SOURCE = os.getenv("STREAM_SOURCE", "hls").strip().lower()
 STREAM_ID = int(os.getenv("STREAM_ID", "1"))          # 0 = HD main, 1 = SD sub
@@ -48,10 +53,10 @@ TMP_DIR = os.getenv("TMP_DIR", "/tmp")
 # Only these alarm types trigger a recording. Use "*" for everything.
 ALLOWED_MSG_TYPES = {
     t.strip()
-    for t in os.getenv(
-        "ALLOWED_MSG_TYPES",
-        "videoMotion,human,crossLineDetection,crossRegionDetection",
-    ).split(",")
+    # Default "*": accept everything and log the payload, so the real msgType
+    # strings for YOUR camera show up in the logs. Narrow this once you know
+    # them -- guessing at Imou's type names just drops events silently.
+    for t in os.getenv("ALLOWED_MSG_TYPES", "*").split(",")
     if t.strip()
 }
 
@@ -71,14 +76,15 @@ app = Flask(__name__)
 # ------------------------------------------------------------------- state
 
 jobs = queue.Queue(maxsize=20)
-_last_event = {}          # device_id -> monotonic timestamp
-_cooldown_lock = threading.Lock()
+_sessions = {}            # device_id -> {"last_motion": unix ts, "active": bool}
+_session_lock = threading.Lock()
 _last_prune = 0.0
 stats = {
     "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     "events_received": 0,
     "events_skipped": 0,
     "clips_uploaded": 0,
+    "events_extended": 0,
     "failures": 0,
     "last_event": None,
     "last_error": None,
@@ -92,15 +98,34 @@ def rtsp_url():
     )
 
 
-def should_record(device_id):
-    """One recording per device per cooldown window; motion fires in bursts."""
-    now = time.monotonic()
-    with _cooldown_lock:
-        last = _last_event.get(device_id, 0)
-        if now - last < COOLDOWN_SECONDS:
+def note_motion(device_id):
+    """Register an alarm. Returns True if a NEW recording should start, False
+    if it merely extends the one already running (or lands in the brief
+    cooldown right after one finished)."""
+    now = time.time()
+    with _session_lock:
+        sess = _sessions.get(device_id)
+        if sess and sess["active"]:
+            sess["last_motion"] = now          # extend, don't start another
             return False
-        _last_event[device_id] = now
+        if sess and now - sess["last_motion"] < COOLDOWN_SECONDS:
+            return False
+        _sessions[device_id] = {"last_motion": now, "active": True}
         return True
+
+
+def last_motion_at(device_id):
+    with _session_lock:
+        sess = _sessions.get(device_id)
+        return sess["last_motion"] if sess else 0.0
+
+
+def end_session(device_id):
+    with _session_lock:
+        sess = _sessions.get(device_id)
+        if sess:
+            sess["active"] = False
+            sess["last_motion"] = time.time()
 
 
 def maybe_prune():
@@ -146,11 +171,20 @@ def handle_event(event):
 
     mp4 = os.path.join(TMP_DIR, base + ".mp4")
     try:
-        if not recorder.record(source, mp4, CLIP_SECONDS, is_hls):
+        ok = recorder.record_extending(
+            source, mp4,
+            last_motion_getter=lambda: last_motion_at(device_id),
+            min_seconds=MIN_CLIP_SECONDS,
+            max_seconds=MAX_CLIP_SECONDS,
+            idle_seconds=MOTION_IDLE_SECONDS,
+            is_hls=is_hls,
+        )
+        if not ok:
             raise RuntimeError("recording produced no usable file")
         drive.upload(mp4, base + ".mp4")
         stats["clips_uploaded"] += 1
     finally:
+        end_session(device_id)
         if os.path.exists(mp4):
             os.remove(mp4)
 
@@ -158,8 +192,9 @@ def handle_event(event):
 
 
 def worker():
-    log.info("Worker thread up (source=%s, clip=%ss, cooldown=%ss)",
-             STREAM_SOURCE, CLIP_SECONDS, COOLDOWN_SECONDS)
+    log.info("Worker up (source=%s, clip=%s-%ss, idle-stop=%ss)",
+             STREAM_SOURCE, MIN_CLIP_SECONDS, MAX_CLIP_SECONDS,
+             MOTION_IDLE_SECONDS)
     while True:
         event = jobs.get()
         try:
@@ -168,6 +203,7 @@ def worker():
             stats["failures"] += 1
             stats["last_error"] = f"{type(exc).__name__}: {exc}"
             log.exception("Event handling failed")
+            end_session(event.get("device_id", ""))
         finally:
             jobs.task_done()
 
@@ -191,8 +227,9 @@ def status():
     body["queue_depth"] = jobs.qsize()
     body["config"] = {
         "stream_source": STREAM_SOURCE,
-        "clip_seconds": CLIP_SECONDS,
-        "cooldown_seconds": COOLDOWN_SECONDS,
+        "min_clip_seconds": MIN_CLIP_SECONDS,
+        "max_clip_seconds": MAX_CLIP_SECONDS,
+        "motion_idle_seconds": MOTION_IDLE_SECONDS,
         "retention_days": RETENTION_DAYS,
         "allowed_msg_types": sorted(ALLOWED_MSG_TYPES),
     }
@@ -224,9 +261,10 @@ def hook(secret):
     accept = bool(device_id) and (
         "*" in ALLOWED_MSG_TYPES or msg_type in ALLOWED_MSG_TYPES
     )
-    if accept and not should_record(device_id):
-        log.info("Cooldown active for %s, skipping", device_id)
-        accept = False
+    if accept and not note_motion(device_id):
+        stats["events_extended"] += 1
+        log.info("Extending the recording already running for %s", device_id)
+        return jsonify(ok=True), 200
 
     if accept:
         event = {

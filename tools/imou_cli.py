@@ -5,6 +5,7 @@ set (or a .env you have sourced).
     python tools/imou_cli.py devices
     python tools/imou_cli.py hls <deviceId> [streamId]
     python tools/imou_cli.py new-secret
+    python tools/imou_cli.py raw <endpoint> [k=v ...]
     python tools/imou_cli.py set-callback https://your-app.onrender.com/hook/<secret>
     python tools/imou_cli.py get-callback
     python tools/imou_cli.py disable-callback
@@ -149,6 +150,27 @@ def main(argv):
         print(f"Registering: {url}")
         print(json.dumps(client.set_message_callback(url), indent=2))
         print("Callback registered. Note: one URL per developer account.")
+
+    elif cmd == "raw":
+        # raw <endpoint> [key=value ...]   -- ints/bools/JSON auto-detected
+        if not args:
+            print('usage: raw <endpoint> [k=v ...]\n'
+                  '  e.g. raw queryLocalRecords deviceId=ABC123 channelId=0 \\\n'
+                  '           beginTime=2026-08-13T00:00:00 endTime=2026-08-13T23:59:59')
+            return 1
+        params = {}
+        for kv in args[1:]:
+            if "=" not in kv:
+                print(f"skipping {kv!r}: not k=v")
+                continue
+            k, v = kv.split("=", 1)
+            try:
+                params[k] = json.loads(v)      # numbers, true/false, arrays
+            except ValueError:
+                params[k] = v                  # plain string
+        print(f"POST {args[0]} params={json.dumps(params)}")
+        print(json.dumps(client.call(args[0], params), indent=2,
+                         ensure_ascii=False))
 
     elif cmd == "new-secret":
         import secrets

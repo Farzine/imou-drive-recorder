@@ -67,6 +67,74 @@ def build_command(source_url, out_path, duration, is_hls):
     return cmd
 
 
+def record_extending(source_url, out_path, last_motion_getter,
+                     min_seconds=10, max_seconds=120, idle_seconds=12,
+                     is_hls=True):
+    """Record for as long as motion keeps happening, like the Imou app does.
+
+    Starts ffmpeg with -t max_seconds as a hard ceiling, then stops early once
+    `last_motion_getter()` (a unix timestamp updated by each new webhook) has
+    been quiet for idle_seconds. Stopping is done by writing 'q' to ffmpeg's
+    stdin rather than killing it, so the MP4 gets its moov atom written and the
+    file is actually playable.
+
+    Resulting duration ~= motion duration + idle_seconds, clamped to
+    [min_seconds, max_seconds].
+    """
+    if not ffmpeg_available():
+        raise RuntimeError("ffmpeg is not installed in this container")
+    if is_hls:
+        wait_for_playlist(source_url)
+
+    cmd = build_command(source_url, out_path, max_seconds, is_hls)
+    log.info("Recording (adaptive, max %ss) -> %s", max_seconds, out_path)
+
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    started = time.monotonic()
+    reason = "ffmpeg reached -t limit"
+
+    try:
+        while proc.poll() is None:
+            time.sleep(0.5)
+            elapsed = time.monotonic() - started
+            if elapsed >= max_seconds + 15:
+                reason = "hard timeout"
+                proc.kill()
+                break
+            if elapsed < min_seconds:
+                continue
+            quiet = time.time() - last_motion_getter()
+            if quiet >= idle_seconds:
+                reason = f"motion stopped ({quiet:.0f}s quiet)"
+                try:
+                    proc.stdin.write(b"q")
+                    proc.stdin.flush()
+                except (BrokenPipeError, OSError):
+                    proc.terminate()
+                break
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    finally:
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            try:
+                stream and stream.close()
+            except OSError:
+                pass
+
+    size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+    if size < 10_000:
+        log.error("Recording unusable (%d bytes)", size)
+        return False
+    log.info("Stopped: %s. %.2f MB in %.0fs",
+             reason, size / 1_048_576, time.monotonic() - started)
+    return True
+
+
 def record(source_url, out_path, duration=15, is_hls=True):
     """Record `duration` seconds to out_path. Returns True on a usable file."""
     if not ffmpeg_available():
